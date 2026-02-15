@@ -37,21 +37,26 @@ func (mr *malformedRequest) Error() string {
 	return mr.message
 }
 
+const maxBodySize = 1024
+
 func decodeJSONBody(r *http.Request, dst interface{}) error {
 	if r.Body == nil {
 		return &malformedRequest{status: http.StatusBadRequest, message: "Request body is empty"}
 	}
 	defer r.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1024))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize+1))
 	if err != nil {
 		return &malformedRequest{status: http.StatusBadRequest, message: "Unable to read request body"}
+	}
+	if len(body) > maxBodySize {
+		return &malformedRequest{status: http.StatusRequestEntityTooLarge, message: fmt.Sprintf("Request body must not be larger than %d bytes", maxBodySize)}
 	}
 
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 
-	if err := dec.Decode(&dst); err != nil {
+	if err := dec.Decode(dst); err != nil {
 		var syntaxError *json.SyntaxError
 		var unmarshalTypeError *json.UnmarshalTypeError
 
@@ -72,9 +77,6 @@ func decodeJSONBody(r *http.Request, dst interface{}) error {
 		case errors.Is(err, io.EOF):
 			msg := "Request body must not be empty"
 			return &malformedRequest{status: http.StatusBadRequest, message: msg}
-		case err.Error() == "http: request body too large":
-			msg := "Request body must not be larger than 1MB"
-			return &malformedRequest{status: http.StatusRequestEntityTooLarge, message: msg}
 		default:
 			return err
 		}

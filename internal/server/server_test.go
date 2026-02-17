@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -39,7 +40,14 @@ func setupTestServer(mockBuilder chain.TxBuilder) *Server {
 		symbol:     "ETH",
 		payout:     1.0,
 	}
-	return NewServer(mockBuilder, cfg)
+	// Use a temporary directory for test storage
+	testDir := "./testdata_temp"
+	os.RemoveAll(testDir) // Clean up before test
+	storage, err := NewStorage(testDir)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create test storage: %v", err))
+	}
+	return NewServer(mockBuilder, nil, cfg, storage)
 }
 
 func TestHandleClaim(t *testing.T) {

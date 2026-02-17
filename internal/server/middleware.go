@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jellydator/ttlcache/v2"
 	"github.com/kataras/hcaptcha"
 	log "github.com/sirupsen/logrus"
 	"github.com/urfave/negroni/v3"
@@ -17,16 +16,14 @@ import (
 
 type Limiter struct {
 	mutex      sync.Mutex
-	cache      *ttlcache.Cache
+	storage    *Storage
 	proxyCount int
 	ttl        time.Duration
 }
 
-func NewLimiter(proxyCount int, ttl time.Duration) *Limiter {
-	cache := ttlcache.NewCache()
-	cache.SkipTTLExtensionOnHit(true)
+func NewLimiter(storage *Storage, proxyCount int, ttl time.Duration) *Limiter {
 	return &Limiter{
-		cache:      cache,
+		storage:    storage,
 		proxyCount: proxyCount,
 		ttl:        ttl,
 	}
@@ -51,40 +48,65 @@ func (l *Limiter) ServeHTTP(w http.ResponseWriter, r *http.Request, next http.Ha
 
 	clientIP := getClientIPFromRequest(l.proxyCount, r)
 	l.mutex.Lock()
-	if l.limitByKey(w, address) || l.limitByKey(w, clientIP) {
+	limited, _, err := l.limitByKey(w, address)
+	if err != nil {
+		l.mutex.Unlock()
+		log.WithError(err).Error("Failed to check rate limit for address")
+		renderJSON(w, claimResponse{Message: "Internal server error"}, http.StatusInternalServerError)
+		return
+	}
+	if limited {
 		l.mutex.Unlock()
 		return
 	}
-	l.cache.SetWithTTL(address, true, l.ttl)
-	l.cache.SetWithTTL(clientIP, true, l.ttl)
+
+	limited, _, err = l.limitByKey(w, clientIP)
+	if err != nil {
+		l.mutex.Unlock()
+		log.WithError(err).Error("Failed to check rate limit for IP")
+		renderJSON(w, claimResponse{Message: "Internal server error"}, http.StatusInternalServerError)
+		return
+	}
+	if limited {
+		l.mutex.Unlock()
+		return
+	}
 	l.mutex.Unlock()
 
 	next.ServeHTTP(w, r)
 	status := w.(negroni.ResponseWriter).Status()
-	if status != http.StatusOK {
-		// If request fails, remove limit records to allow retry
-		l.mutex.Lock()
-		l.cache.Remove(address)
-		l.cache.Remove(clientIP)
-		l.mutex.Unlock()
-		return
+	if status == http.StatusOK || status == http.StatusPartialContent {
+		// Request succeeded, record the time
+		now := time.Now()
+		if err := l.storage.SetLastRequestTime(address, now); err != nil {
+			log.WithError(err).Error("Failed to store address request time")
+		}
+		if err := l.storage.SetLastRequestTime(clientIP, now); err != nil {
+			log.WithError(err).Error("Failed to store IP request time")
+		}
+		log.WithFields(log.Fields{
+			"address":  address,
+			"clientIP": clientIP,
+		}).Info("Request succeeded, rate limit applied")
 	}
-	log.WithFields(log.Fields{
-		"address":  address,
-		"clientIP": clientIP,
-	}).Info("Request succeeded, rate limit applied")
 }
 
-func (l *Limiter) limitByKey(w http.ResponseWriter, key string) bool {
-	if _, ttl, err := l.cache.GetWithTTL(key); err == nil {
-		errMsg := fmt.Sprintf("You have exceeded the rate limit. Please wait %s before you try again", ttl.Round(time.Second))
-		renderJSON(w, claimResponse{Message: errMsg}, http.StatusTooManyRequests)
-		return true
+func (l *Limiter) limitByKey(w http.ResponseWriter, key string) (bool, time.Duration, error) {
+	limited, remaining, err := l.storage.IsWithinLimit(key, l.ttl)
+	if err != nil {
+		return false, 0, err
 	}
-	return false
+	if limited {
+		errMsg := fmt.Sprintf("You have exceeded the rate limit. Please wait %s before you try again", remaining.Round(time.Second))
+		renderJSON(w, claimResponse{Message: errMsg}, http.StatusTooManyRequests)
+		return true, remaining, nil
+	}
+	return false, 0, nil
 }
 
 func getClientIPFromRequest(proxyCount int, r *http.Request) string {
+	var ip string
+	
 	if proxyCount > 0 {
 		xForwardedFor := r.Header.Get("X-Forwarded-For")
 		if xForwardedFor != "" {
@@ -94,15 +116,24 @@ func getClientIPFromRequest(proxyCount int, r *http.Request) string {
 			if partIndex < 0 {
 				partIndex = 0
 			}
-			return strings.TrimSpace(xForwardedForParts[partIndex])
+			ip = strings.TrimSpace(xForwardedForParts[partIndex])
 		}
 	}
 
-	remoteIP, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		remoteIP = r.RemoteAddr
+	if ip == "" {
+		var err error
+		ip, _, err = net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr
+		}
 	}
-	return remoteIP
+
+	// Normalize loopback addresses: convert IPv6 ::1 to IPv4 127.0.0.1 for consistency
+	if ip == "::1" {
+		ip = "127.0.0.1"
+	}
+	
+	return ip
 }
 
 type Captcha struct {

@@ -23,21 +23,23 @@ type Server struct {
 	cfg         *Config
 	server      *http.Server
 	payoutWei   *big.Int
+	storage     *Storage
 }
 
-func NewServer(builder chain.TxBuilder, erc20Minter *chain.ERC20Minter, cfg *Config) *Server {
+func NewServer(builder chain.TxBuilder, erc20Minter *chain.ERC20Minter, cfg *Config, storage *Storage) *Server {
 	return &Server{
 		TxBuilder:   builder,
 		erc20Minter: erc20Minter,
 		cfg:         cfg,
 		payoutWei:   chain.EtherToWei(cfg.payout),
+		storage:     storage,
 	}
 }
 
 func (s *Server) setupRouter() *http.ServeMux {
 	router := http.NewServeMux()
 	router.Handle("/", http.FileServer(web.Dist()))
-	limiter := NewLimiter(s.cfg.proxyCount, time.Duration(s.cfg.interval)*time.Minute)
+	limiter := NewLimiter(s.storage, s.cfg.proxyCount, time.Duration(s.cfg.interval)*time.Minute)
 	middlewares := []negroni.Handler{limiter}
 	if s.cfg.hcaptchaSecret != "" {
 		middlewares = append(middlewares, NewCaptcha(s.cfg.hcaptchaSiteKey, s.cfg.hcaptchaSecret))

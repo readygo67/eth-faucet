@@ -29,11 +29,13 @@ func TestTxBuilder(t *testing.T) {
 	})
 	defer patches.Reset()
 
+	nonceManager := NewNonceManager(simClient, fromAddress)
 	txBuilder := &TxBuild{
 		client:          simClient,
 		privateKey:      privateKey,
 		signer:          types.NewLondonSigner(big.NewInt(1337)),
 		fromAddress:     crypto.PubkeyToAddress(privateKey.PublicKey),
+		nonceManager:    nonceManager,
 		supportsEIP1559: false,
 	}
 	bgCtx := context.Background()

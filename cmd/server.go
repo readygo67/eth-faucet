@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/chainflag/eth-faucet/internal/chain"
@@ -28,7 +30,7 @@ var (
 	proxyCntFlag = flag.Int("proxycount", 0, "Count of reverse proxies in front of the server")
 	versionFlag  = flag.Bool("version", false, "Print version number")
 
-	payoutFlag   = flag.Float64("faucet.amount", 1, "Number of Ethers to transfer per user request")
+	payoutFlag   = flag.Float64("faucet.amount", 0.01, "Number of Ethers to transfer per user request")
 	intervalFlag = flag.Int("faucet.minutes", 1440, "Number of minutes to wait between funding rounds")
 	netnameFlag  = flag.String("faucet.name", "testnet", "Network name to display on the frontend")
 	symbolFlag   = flag.String("faucet.symbol", "ETH", "Token symbol to display on the frontend")
@@ -40,9 +42,42 @@ var (
 
 	hcaptchaSiteKeyFlag = flag.String("hcaptcha.sitekey", os.Getenv("HCAPTCHA_SITEKEY"), "hCaptcha sitekey")
 	hcaptchaSecretFlag  = flag.String("hcaptcha.secret", os.Getenv("HCAPTCHA_SECRET"), "hCaptcha secret")
+
+	erc20TokenAddressFlag = flag.String("erc20.token", os.Getenv("ERC20_TOKEN_ADDRESS"), "ERC20 token contract address (optional)")
+	erc20TokenAmountFlag  = flag.Int64("erc20.amount", 100, "Amount of ERC20 tokens to mint per request")
 )
 
 func init() {
+	// Load .env file BEFORE flag parsing so environment variables are available
+	// This must be in cmd package init() because cmd.init() runs before main.init()
+	if err := godotenv.Load(); err != nil {
+		// .env file is optional, so we only log if there's an error other than file not found
+		if _, ok := err.(*os.PathError); !ok {
+			log.Printf("Warning: Error loading .env file: %v", err)
+		}
+	}
+	
+	// Update flag defaults from environment variables after loading .env
+	// Flag defaults are evaluated when flag.String() is called, before .env is loaded
+	if envPrivKey := os.Getenv("PRIVATE_KEY"); envPrivKey != "" && *privKeyFlag == "" {
+		*privKeyFlag = envPrivKey
+	}
+	if envProvider := os.Getenv("WEB3_PROVIDER"); envProvider != "" && *providerFlag == "" {
+		*providerFlag = envProvider
+	}
+	if envKeystore := os.Getenv("KEYSTORE"); envKeystore != "" && *keyJSONFlag == "" {
+		*keyJSONFlag = envKeystore
+	}
+	if envHcaptchaSiteKey := os.Getenv("HCAPTCHA_SITEKEY"); envHcaptchaSiteKey != "" && *hcaptchaSiteKeyFlag == "" {
+		*hcaptchaSiteKeyFlag = envHcaptchaSiteKey
+	}
+	if envHcaptchaSecret := os.Getenv("HCAPTCHA_SECRET"); envHcaptchaSecret != "" && *hcaptchaSecretFlag == "" {
+		*hcaptchaSecretFlag = envHcaptchaSecret
+	}
+	if envErc20Token := os.Getenv("ERC20_TOKEN_ADDRESS"); envErc20Token != "" && *erc20TokenAddressFlag == "" {
+		*erc20TokenAddressFlag = envErc20Token
+	}
+	
 	flag.Parse()
 	if *versionFlag {
 		fmt.Println(appVersion)
@@ -60,13 +95,41 @@ func Execute() {
 		chainID = big.NewInt(int64(value))
 	}
 
-	txBuilder, err := chain.NewTxBuilder(*providerFlag, privateKey, chainID)
+	// Create shared client and nonce manager for unified nonce management
+	client, err := ethclient.Dial(*providerFlag)
 	if err != nil {
 		panic(fmt.Errorf("cannot connect to web3 provider: %w", err))
 	}
 
-	config := server.NewConfig(*netnameFlag, *symbolFlag, *httpPortFlag, *intervalFlag, *proxyCntFlag, *payoutFlag, *hcaptchaSiteKeyFlag, *hcaptchaSecretFlag)
-	srv := server.NewServer(txBuilder, config)
+	if chainID == nil {
+		chainID, err = client.ChainID(context.Background())
+		if err != nil {
+			panic(fmt.Errorf("failed to get chain ID: %w", err))
+		}
+	}
+
+	fromAddress := crypto.PubkeyToAddress(privateKey.PublicKey)
+	nonceManager := chain.NewNonceManager(client, fromAddress)
+	log.Info("Shared nonce manager created for unified transaction management")
+
+	// Create TxBuilder with shared nonce manager
+	txBuilder, err := chain.NewTxBuilderWithNonceManager(*providerFlag, privateKey, chainID, nonceManager)
+	if err != nil {
+		panic(fmt.Errorf("failed to initialize transaction builder: %w", err))
+	}
+
+	// Create ERC20Minter with shared nonce manager (if configured)
+	var erc20Minter *chain.ERC20Minter
+	if *erc20TokenAddressFlag != "" {
+		erc20Minter, err = chain.NewERC20MinterWithNonceManager(*providerFlag, privateKey, *erc20TokenAddressFlag, chainID, nonceManager)
+		if err != nil {
+			panic(fmt.Errorf("failed to initialize ERC20 minter: %w", err))
+		}
+		log.WithField("token", *erc20TokenAddressFlag).Info("ERC20 minter initialized with shared nonce manager")
+	}
+
+	config := server.NewConfig(*netnameFlag, *symbolFlag, *httpPortFlag, *intervalFlag, *proxyCntFlag, *payoutFlag, *hcaptchaSiteKeyFlag, *hcaptchaSecretFlag, *erc20TokenAddressFlag, *erc20TokenAmountFlag)
+	srv := server.NewServer(txBuilder, erc20Minter, config)
 
 	// Run server in goroutine
 	go srv.Run()
@@ -90,7 +153,9 @@ func Execute() {
 
 func getPrivateKeyFromFlags() (*ecdsa.PrivateKey, error) {
 	if *privKeyFlag != "" {
-		hexkey := *privKeyFlag
+		hexkey := strings.TrimSpace(*privKeyFlag)
+		// Remove quotes if present (godotenv may preserve quotes from .env file)
+		hexkey = strings.Trim(hexkey, `"'`)
 		if chain.Has0xPrefix(hexkey) {
 			hexkey = hexkey[2:]
 		}

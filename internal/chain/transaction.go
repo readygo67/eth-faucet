@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
-	log "github.com/sirupsen/logrus"
 )
 
 type TxBuilder interface {
@@ -26,11 +24,15 @@ type TxBuild struct {
 	privateKey      *ecdsa.PrivateKey
 	signer          types.Signer
 	fromAddress     common.Address
-	nonce           uint64
+	nonceManager    *NonceManager
 	supportsEIP1559 bool
 }
 
 func NewTxBuilder(provider string, privateKey *ecdsa.PrivateKey, chainID *big.Int) (TxBuilder, error) {
+	return NewTxBuilderWithNonceManager(provider, privateKey, chainID, nil)
+}
+
+func NewTxBuilderWithNonceManager(provider string, privateKey *ecdsa.PrivateKey, chainID *big.Int, nonceManager *NonceManager) (TxBuilder, error) {
 	client, err := ethclient.Dial(provider)
 	if err != nil {
 		return nil, err
@@ -48,14 +50,21 @@ func NewTxBuilder(provider string, privateKey *ecdsa.PrivateKey, chainID *big.In
 		return nil, err
 	}
 
+	fromAddress := crypto.PubkeyToAddress(privateKey.PublicKey)
+	
+	// Use provided nonce manager or create a new one
+	if nonceManager == nil {
+		nonceManager = NewNonceManager(client, fromAddress)
+	}
+
 	txBuilder := &TxBuild{
 		client:          client,
 		privateKey:      privateKey,
 		signer:          types.NewLondonSigner(chainID),
-		fromAddress:     crypto.PubkeyToAddress(privateKey.PublicKey),
+		fromAddress:     fromAddress,
+		nonceManager:    nonceManager,
 		supportsEIP1559: supportsEIP1559,
 	}
-	txBuilder.refreshNonce(context.Background())
 
 	return txBuilder, nil
 }
@@ -72,7 +81,7 @@ func (b *TxBuild) Transfer(ctx context.Context, to string, value *big.Int) (comm
 	gasLimit := uint64(21000)
 	toAddress := common.HexToAddress(to)
 
-	nonce := b.getAndIncrementNonce()
+	nonce := b.nonceManager.GetAndIncrement()
 
 	var err error
 	var unsignedTx *types.Transaction
@@ -94,7 +103,7 @@ func (b *TxBuild) Transfer(ctx context.Context, to string, value *big.Int) (comm
 
 	if err = b.client.SendTransaction(ctx, signedTx); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "nonce") {
-			b.refreshNonce(ctx)
+			b.nonceManager.RefreshNonce(ctx)
 		}
 		return common.Hash{}, err
 	}
@@ -143,23 +152,6 @@ func (b *TxBuild) buildLegacyTx(ctx context.Context, to *common.Address, value *
 	}), nil
 }
 
-func (b *TxBuild) getAndIncrementNonce() uint64 {
-	return atomic.AddUint64(&b.nonce, 1) - 1
-}
-
-func (b *TxBuild) refreshNonce(ctx context.Context) {
-	nonce, err := b.client.PendingNonceAt(ctx, b.Sender())
-	if err != nil {
-		log.WithFields(log.Fields{
-			"address": b.Sender(),
-			"error":   err,
-		}).Error("failed to refresh account nonce")
-		return
-	}
-
-	atomic.StoreUint64(&b.nonce, nonce)
-	log.WithField("nonce", nonce).Info("Nonce refreshed successfully")
-}
 
 func checkEIP1559Support(client *ethclient.Client) (bool, error) {
 	header, err := client.HeaderByNumber(context.Background(), nil)

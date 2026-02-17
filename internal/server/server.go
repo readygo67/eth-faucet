@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	log "github.com/sirupsen/logrus"
 	"github.com/urfave/negroni/v3"
 
@@ -18,16 +19,18 @@ import (
 
 type Server struct {
 	chain.TxBuilder
-	cfg       *Config
-	server    *http.Server
-	payoutWei *big.Int
+	erc20Minter *chain.ERC20Minter
+	cfg         *Config
+	server      *http.Server
+	payoutWei   *big.Int
 }
 
-func NewServer(builder chain.TxBuilder, cfg *Config) *Server {
+func NewServer(builder chain.TxBuilder, erc20Minter *chain.ERC20Minter, cfg *Config) *Server {
 	return &Server{
-		TxBuilder: builder,
-		cfg:       cfg,
-		payoutWei: chain.EtherToWei(cfg.payout),
+		TxBuilder:   builder,
+		erc20Minter: erc20Minter,
+		cfg:         cfg,
+		payoutWei:   chain.EtherToWei(cfg.payout),
 	}
 }
 
@@ -81,25 +84,69 @@ func (s *Server) handleClaim() http.HandlerFunc {
 		// Address has already been validated by limiter
 		address, _ := readAddress(r)
 
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 
-		txHash, err := s.Transfer(ctx, address, new(big.Int).Set(s.payoutWei))
+		// Send ETH
+		ethTxHash, err := s.Transfer(ctx, address, new(big.Int).Set(s.payoutWei))
 		if err != nil {
 			log.WithFields(log.Fields{
 				"error":   err,
 				"address": address,
-			}).Error("Failed to send transaction")
-			renderJSON(w, claimResponse{Message: fmt.Sprintf("Transaction failed: %v", err)}, http.StatusInternalServerError)
+			}).Error("Failed to send ETH transaction")
+			renderJSON(w, claimResponse{Message: fmt.Sprintf("ETH transaction failed: %v", err)}, http.StatusInternalServerError)
 			return
 		}
 
 		log.WithFields(log.Fields{
-			"txHash":  txHash,
+			"txHash":  ethTxHash,
 			"address": address,
-		}).Info("Transaction sent successfully")
-		resp := claimResponse{Message: fmt.Sprintf("Txhash: %s", txHash)}
-		renderJSON(w, resp, http.StatusOK)
+			"type":    "ETH",
+		}).Info("ETH transaction sent successfully")
+
+		// Mint ERC20 tokens if configured
+		var erc20TxHash common.Hash
+		if s.erc20Minter != nil {
+			// Wait a short time to ensure ETH transaction is submitted to the mempool
+			// This helps prevent nonce conflicts
+			time.Sleep(200 * time.Millisecond)
+
+			tokenAmount := big.NewInt(s.cfg.erc20TokenAmount)
+			erc20TxHash, err = s.erc20Minter.Mint(ctx, address, tokenAmount)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"error":   err,
+					"address": address,
+				}).Error("Failed to mint ERC20 tokens")
+				// ETH was sent successfully, but ERC20 mint failed
+				resp := claimResponse{
+					Message:   fmt.Sprintf("ETH sent (Txhash: %s), but ERC20 mint failed: %v", ethTxHash, err),
+					EthTxHash: ethTxHash.Hex(),
+				}
+				renderJSON(w, resp, http.StatusPartialContent)
+				return
+			}
+
+			log.WithFields(log.Fields{
+				"txHash":  erc20TxHash,
+				"address": address,
+				"amount":  tokenAmount,
+				"type":    "ERC20",
+			}).Info("ERC20 tokens minted successfully")
+
+			resp := claimResponse{
+				Message:     fmt.Sprintf("ETH Txhash: %s, ERC20 Txhash: %s", ethTxHash, erc20TxHash),
+				EthTxHash:   ethTxHash.Hex(),
+				Erc20TxHash: erc20TxHash.Hex(),
+			}
+			renderJSON(w, resp, http.StatusOK)
+		} else {
+			resp := claimResponse{
+				Message:   fmt.Sprintf("ETH Txhash: %s", ethTxHash),
+				EthTxHash: ethTxHash.Hex(),
+			}
+			renderJSON(w, resp, http.StatusOK)
+		}
 	}
 }
 
@@ -109,12 +156,21 @@ func (s *Server) handleInfo() http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
-		renderJSON(w, infoResponse{
+		resp := infoResponse{
 			Account:         s.Sender().String(),
 			Network:         s.cfg.network,
 			Symbol:          s.cfg.symbol,
 			Payout:          strconv.FormatFloat(s.cfg.payout, 'f', -1, 64),
 			HcaptchaSiteKey: s.cfg.hcaptchaSiteKey,
-		}, http.StatusOK)
+		}
+		
+		// Add ERC20 token info if configured
+		if s.cfg.erc20TokenAddress != "" {
+			resp.Erc20TokenAmount = strconv.FormatInt(s.cfg.erc20TokenAmount, 10)
+			// Default token symbol to "FAUCET" if not specified
+			resp.Erc20TokenSymbol = "FAUCET"
+		}
+		
+		renderJSON(w, resp, http.StatusOK)
 	}
 }

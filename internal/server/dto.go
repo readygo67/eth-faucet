@@ -18,6 +18,8 @@ type claimRequest struct {
 
 type claimResponse struct {
 	Message string `json:"msg"`
+	EthTxHash string `json:"eth_txhash,omitempty"`
+	Erc20TxHash string `json:"erc20_txhash,omitempty"`
 }
 
 type infoResponse struct {
@@ -26,6 +28,8 @@ type infoResponse struct {
 	Payout          string `json:"payout"`
 	Symbol          string `json:"symbol"`
 	HcaptchaSiteKey string `json:"hcaptcha_sitekey,omitempty"`
+	Erc20TokenAmount string `json:"erc20_token_amount,omitempty"`
+	Erc20TokenSymbol string `json:"erc20_token_symbol,omitempty"`
 }
 
 type malformedRequest struct {

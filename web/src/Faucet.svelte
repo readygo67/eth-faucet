@@ -10,12 +10,16 @@
     payout: 1,
     symbol: 'ETH',
     hcaptcha_sitekey: '',
+    erc20_token_amount: '',
+    erc20_token_symbol: '',
   };
 
   let mounted = false;
   let hcaptchaLoaded = false;
   let isLoading = false;
   let widgetID = null;
+  let showSuccessModal = false;
+  let successMessage = '';
 
   // Use unique function name to avoid global variable conflicts
   const HCAPTCHA_CALLBACK_NAME = 'hcaptchaOnLoad_' + Date.now();
@@ -171,7 +175,8 @@
 
       if (res.ok) {
         const message = data?.msg || 'Transaction successful';
-        toast({ message, type: 'is-success' });
+        successMessage = message;
+        showSuccessModal = true;
         input = '';
       } else {
         const errorMessage = data?.msg || 'Request failed';
@@ -241,12 +246,12 @@
       <div class="container has-text-centered">
         <div class="column is-6 is-offset-3">
           <h1 class="title">
-            Receive {faucetInfo.payout}
-            {faucetInfo.symbol} per request
+            {#if faucetInfo.erc20_token_amount}
+              Receive {faucetInfo.payout} {faucetInfo.symbol} & {faucetInfo.erc20_token_amount} {faucetInfo.erc20_token_symbol} per request
+            {:else}
+              Receive {faucetInfo.payout} {faucetInfo.symbol} per request
+            {/if}
           </h1>
-          <h2 class="subtitle">
-            Serving from {faucetInfo.account}
-          </h2>
           <div id="hcaptcha" data-size="invisible"></div>
           <div class="box">
             <div class="field is-grouped">
@@ -281,6 +286,47 @@
   </section>
 </main>
 
+<!-- Success Modal -->
+<div class="modal" class:is-active={showSuccessModal}>
+  <div
+    class="modal-background"
+    role="button"
+    tabindex="0"
+    onclick={() => showSuccessModal = false}
+    onkeydown={(e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        showSuccessModal = false;
+      }
+    }}
+    aria-label="Close modal"
+  ></div>
+  <div class="modal-card">
+    <header class="modal-card-head">
+      <p class="modal-card-title">Success</p>
+      <button
+        class="delete"
+        aria-label="close"
+        onclick={() => showSuccessModal = false}
+      ></button>
+    </header>
+    <section class="modal-card-body">
+      <div class="content">
+        <p class="has-text-success has-text-weight-semibold">
+          {successMessage}
+        </p>
+      </div>
+    </section>
+    <footer class="modal-card-foot">
+      <button
+        class="button is-success"
+        onclick={() => showSuccessModal = false}
+      >
+        OK
+      </button>
+    </footer>
+  </div>
+</div>
+
 <style>
   .hero.is-info {
     background:
@@ -290,10 +336,6 @@
     -moz-background-size: cover;
     -o-background-size: cover;
     background-size: cover;
-  }
-  .hero .subtitle {
-    padding: 3rem 0;
-    line-height: 1.5;
   }
   .box {
     border-radius: 19px;

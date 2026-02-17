@@ -105,12 +105,9 @@ func (s *Server) handleClaim() http.HandlerFunc {
 		}).Info("ETH transaction sent successfully")
 
 		// Mint ERC20 tokens if configured
+		// Note: Nonce is now managed by shared NonceManager, so no delay needed
 		var erc20TxHash common.Hash
 		if s.erc20Minter != nil {
-			// Wait a short time to ensure ETH transaction is submitted to the mempool
-			// This helps prevent nonce conflicts
-			time.Sleep(200 * time.Millisecond)
-
 			tokenAmount := big.NewInt(s.cfg.erc20TokenAmount)
 			erc20TxHash, err = s.erc20Minter.Mint(ctx, address, tokenAmount)
 			if err != nil {

@@ -79,7 +79,7 @@
   });
 
   async function handleRequest() {
-    if (isLoading) return;
+    if (isLoading || showSuccessModal) return;
 
     let address = input?.trim();
     if (!address) {
@@ -210,7 +210,7 @@
   {/if}
 </svelte:head>
 
-<main>
+<main class:modal-active={showSuccessModal}>
   <section class="hero is-info is-fullheight">
     <div class="hero-head">
       <nav class="navbar">
@@ -261,8 +261,9 @@
                   class="input is-rounded"
                   type="text"
                   placeholder="Enter your address or ENS name"
+                  disabled={showSuccessModal}
                   onkeydown={(e) => {
-                    if (e.key === 'Enter' && !isLoading) {
+                    if (e.key === 'Enter' && !isLoading && !showSuccessModal) {
                       handleRequest();
                     }
                   }}
@@ -272,7 +273,7 @@
                 <button
                   onclick={handleRequest}
                   class="button is-primary is-rounded"
-                  disabled={isLoading}
+                  disabled={isLoading || showSuccessModal}
                   class:is-loading={isLoading}
                 >
                   Request
@@ -288,26 +289,10 @@
 
 <!-- Success Modal -->
 <div class="modal" class:is-active={showSuccessModal}>
-  <div
-    class="modal-background"
-    role="button"
-    tabindex="0"
-    onclick={() => showSuccessModal = false}
-    onkeydown={(e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        showSuccessModal = false;
-      }
-    }}
-    aria-label="Close modal"
-  ></div>
+  <div class="modal-background"></div>
   <div class="modal-card">
     <header class="modal-card-head">
       <p class="modal-card-title">Success</p>
-      <button
-        class="delete"
-        aria-label="close"
-        onclick={() => showSuccessModal = false}
-      ></button>
     </header>
     <section class="modal-card-body">
       <div class="content">
@@ -319,7 +304,9 @@
     <footer class="modal-card-foot">
       <button
         class="button is-success"
-        onclick={() => showSuccessModal = false}
+        onclick={() => {
+          showSuccessModal = false;
+        }}
       >
         OK
       </button>
@@ -339,5 +326,27 @@
   }
   .box {
     border-radius: 19px;
+  }
+  
+  /* Prevent interaction with page content when modal is active */
+  main.modal-active {
+    pointer-events: none;
+    user-select: none;
+  }
+  
+  /* Ensure modal can still be interacted with */
+  .modal.is-active {
+    pointer-events: auto;
+  }
+  
+  /* Modal background should not be clickable */
+  .modal.is-active .modal-background {
+    pointer-events: auto;
+    cursor: default;
+  }
+  
+  /* Only allow interaction with modal card content */
+  .modal.is-active .modal-card {
+    pointer-events: auto;
   }
 </style>

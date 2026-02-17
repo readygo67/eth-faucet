@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -24,7 +23,7 @@ type ERC20Minter struct {
 	signer          types.Signer
 	fromAddress     common.Address
 	tokenAddress    common.Address
-	nonce           uint64
+	nonceManager    *NonceManager
 	supportsEIP1559 bool
 	abi             abi.ABI
 }
@@ -33,6 +32,10 @@ type ERC20Minter struct {
 const erc20MintABI = `[{"inputs":[{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"mint","outputs":[],"stateMutability":"nonpayable","type":"function"}]`
 
 func NewERC20Minter(provider string, privateKey *ecdsa.PrivateKey, tokenAddress string, chainID *big.Int) (*ERC20Minter, error) {
+	return NewERC20MinterWithNonceManager(provider, privateKey, tokenAddress, chainID, nil)
+}
+
+func NewERC20MinterWithNonceManager(provider string, privateKey *ecdsa.PrivateKey, tokenAddress string, chainID *big.Int, nonceManager *NonceManager) (*ERC20Minter, error) {
 	client, err := ethclient.Dial(provider)
 	if err != nil {
 		return nil, err
@@ -60,16 +63,23 @@ func NewERC20Minter(provider string, privateKey *ecdsa.PrivateKey, tokenAddress 
 		return nil, err
 	}
 
+	fromAddress := crypto.PubkeyToAddress(privateKey.PublicKey)
+	
+	// Use provided nonce manager or create a new one
+	if nonceManager == nil {
+		nonceManager = NewNonceManager(client, fromAddress)
+	}
+
 	minter := &ERC20Minter{
 		client:          client,
 		privateKey:      privateKey,
 		signer:          types.NewLondonSigner(chainID),
-		fromAddress:     crypto.PubkeyToAddress(privateKey.PublicKey),
+		fromAddress:     fromAddress,
 		tokenAddress:    tokenAddr,
+		nonceManager:    nonceManager,
 		supportsEIP1559: supportsEIP1559,
 		abi:             parsedABI,
 	}
-	minter.refreshNonce(context.Background())
 
 	return minter, nil
 }
@@ -103,10 +113,8 @@ func (m *ERC20Minter) Mint(ctx context.Context, to string, amount *big.Int) (com
 		gasLimit = gasLimit + (gasLimit * 20 / 100)
 	}
 
-	// Refresh nonce before minting to ensure we use the correct nonce
-	// This is important when multiple transactions are sent from the same account
-	m.refreshNonce(ctx)
-	nonce := m.getAndIncrementNonce()
+	// Get nonce from shared nonce manager (no need to refresh as it's shared with ETH transfers)
+	nonce := m.nonceManager.GetAndIncrement()
 
 	var unsignedTx *types.Transaction
 
@@ -127,7 +135,7 @@ func (m *ERC20Minter) Mint(ctx context.Context, to string, amount *big.Int) (com
 
 	if err = m.client.SendTransaction(ctx, signedTx); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "nonce") {
-			m.refreshNonce(ctx)
+			m.nonceManager.RefreshNonce(ctx)
 		}
 		return common.Hash{}, err
 	}
@@ -177,20 +185,3 @@ func (m *ERC20Minter) buildLegacyTx(ctx context.Context, to *common.Address, val
 	}), nil
 }
 
-func (m *ERC20Minter) getAndIncrementNonce() uint64 {
-	return atomic.AddUint64(&m.nonce, 1) - 1
-}
-
-func (m *ERC20Minter) refreshNonce(ctx context.Context) {
-	nonce, err := m.client.PendingNonceAt(ctx, m.fromAddress)
-	if err != nil {
-		log.WithFields(log.Fields{
-			"address": m.fromAddress,
-			"error":   err,
-		}).Error("failed to refresh ERC20 minter account nonce")
-		return
-	}
-
-	atomic.StoreUint64(&m.nonce, nonce)
-	log.WithField("nonce", nonce).Info("ERC20 minter nonce refreshed successfully")
-}

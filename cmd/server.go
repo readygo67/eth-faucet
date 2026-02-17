@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
 
@@ -94,18 +95,37 @@ func Execute() {
 		chainID = big.NewInt(int64(value))
 	}
 
-	txBuilder, err := chain.NewTxBuilder(*providerFlag, privateKey, chainID)
+	// Create shared client and nonce manager for unified nonce management
+	client, err := ethclient.Dial(*providerFlag)
 	if err != nil {
 		panic(fmt.Errorf("cannot connect to web3 provider: %w", err))
 	}
 
+	if chainID == nil {
+		chainID, err = client.ChainID(context.Background())
+		if err != nil {
+			panic(fmt.Errorf("failed to get chain ID: %w", err))
+		}
+	}
+
+	fromAddress := crypto.PubkeyToAddress(privateKey.PublicKey)
+	nonceManager := chain.NewNonceManager(client, fromAddress)
+	log.Info("Shared nonce manager created for unified transaction management")
+
+	// Create TxBuilder with shared nonce manager
+	txBuilder, err := chain.NewTxBuilderWithNonceManager(*providerFlag, privateKey, chainID, nonceManager)
+	if err != nil {
+		panic(fmt.Errorf("failed to initialize transaction builder: %w", err))
+	}
+
+	// Create ERC20Minter with shared nonce manager (if configured)
 	var erc20Minter *chain.ERC20Minter
 	if *erc20TokenAddressFlag != "" {
-		erc20Minter, err = chain.NewERC20Minter(*providerFlag, privateKey, *erc20TokenAddressFlag, chainID)
+		erc20Minter, err = chain.NewERC20MinterWithNonceManager(*providerFlag, privateKey, *erc20TokenAddressFlag, chainID, nonceManager)
 		if err != nil {
 			panic(fmt.Errorf("failed to initialize ERC20 minter: %w", err))
 		}
-		log.WithField("token", *erc20TokenAddressFlag).Info("ERC20 minter initialized")
+		log.WithField("token", *erc20TokenAddressFlag).Info("ERC20 minter initialized with shared nonce manager")
 	}
 
 	config := server.NewConfig(*netnameFlag, *symbolFlag, *httpPortFlag, *intervalFlag, *proxyCntFlag, *payoutFlag, *hcaptchaSiteKeyFlag, *hcaptchaSecretFlag, *erc20TokenAddressFlag, *erc20TokenAmountFlag)
